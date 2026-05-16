@@ -3,11 +3,11 @@
 # dependencies = [
 #     "marimo>=0.19.6",
 #     "numpy>=2.4.0",
-#     "interview",
+#     "yukka-interview",
 #     "cvxpy>=1.8.2",
 # ]
 # [tool.uv.sources]
-# interview = { path = "../../..", editable = true }
+# yukka-interview = { path = "../../..", editable = true }
 # ///
 """Experiment 1: Momentum Strategy."""
 
