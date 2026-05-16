@@ -46,22 +46,6 @@ yukka-interview/
     test_returns.py         # Returns class tests
 ```
 
-## Data Layer
-
-The `YukkaRepository` class provides access to STOXX 600 price data:
-
-```python
-from interview.data import YukkaRepository
-from yukka.data import Index
-
-repo = YukkaRepository(index=Index.STOXX600)
-assets = repo.assets                          # list of Asset objects
-prices = repo.prices(assets, mask=True)       # wide DataFrame: date + one column per asset
-returns = repo.returns(assets)                # same shape, simple returns
-```
-
-All data is cached locally in parquet files -- no API key is needed.
-
 ## Submitting Your Work
 
 1. Commit your changes to your fork.
