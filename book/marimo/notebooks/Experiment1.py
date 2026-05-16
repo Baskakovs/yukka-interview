@@ -62,26 +62,14 @@ def _():
 def _():
     from yukka.data import Index
 
-    from interview.data.config import CACHE_DIR as _CACHE_DIR
-
     repo = YukkaRepository(index=Index.STOXX600)
     assets = repo.assets
+
+    # Full STOXX 600 prices (membership-masked)
     prices_all = repo.prices(assets=assets, mask=True)
 
-    # Filter to STOXX 100 constituents only
-    _ranks = pl.read_parquet(_CACHE_DIR / "ranks_wide.parquet").rename({"review_date": "date"}).sort("date")
-    _rank_cols = set(_ranks.columns) - {"date"}
-    # Keep any stock that was ever ranked in the top 100
-    _ever_top100 = set()
-    for c in _rank_cols:
-        vals = _ranks[c].drop_nulls()
-        if len(vals) > 0 and (vals <= 100).any():
-            _ever_top100.add(c)
-
-    # Match price columns (handling ^suffix for delisted tickers)
-    _price_cols = [c for c in prices_all.columns if c != "date"]
-    _keep = [c for c in _price_cols if c.split("^")[0] in _ever_top100]
-    prices = prices_all.select(["date", *_keep])
+    # Filter to STOXX 100 constituents only (rank 1-100 by market cap)
+    prices = repo.prices(assets=assets, mask=True, rank_range=(1, 100))
     return prices, prices_all
 
 
