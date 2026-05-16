@@ -62,37 +62,6 @@ returns = repo.returns(assets)                # same shape, simple returns
 
 All data is cached locally in parquet files -- no API key is needed.
 
-## Your Task
-
-Open the notebook (`make marimo`) and implement:
-
-### Part 1: Signal & IC Analysis
-
-- **Momentum signal**: compute a cross-sectional momentum signal from price data
-  (e.g. 12-month return, or 12-1 month skipping the most recent month).
-- **Information Coefficient (IC)**: measure the rank correlation between your signal
-  and forward 1-month returns. Report the **mean IC** across all months.
-
-### Part 2: Portfolio Construction
-
-- **Markowitz optimisation**: use `cvxpy` to build a long-only portfolio that
-  maximises expected return subject to a risk budget.
-- **Backtest**: compute monthly portfolio returns and report the **annualised Sharpe ratio**.
-
-## Running Tests
-
-```bash
-make test
-# or
-uv run pytest
-```
-
-## Linting
-
-```bash
-make lint
-```
-
 ## Submitting Your Work
 
 1. Commit your changes to your fork.
