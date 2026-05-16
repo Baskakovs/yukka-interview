@@ -215,6 +215,47 @@ wheels = [
 ]
 
 [[package]]
+name = "honey"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "cvxpy" },
+    { name = "jquantstats" },
+    { name = "numpy" },
+    { name = "plotly" },
+    { name = "polars" },
+    { name = "python-dotenv" },
+    { name = "yukka" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "marimo" },
+    { name = "pytest" },
+    { name = "pytest-mock" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cvxpy", specifier = ">=1.8.2" },
+    { name = "jquantstats", specifier = ">=0.8.0" },
+    { name = "numpy", specifier = ">=2.4.1" },
+    { name = "plotly", specifier = ">=6.5.2" },
+    { name = "polars", specifier = ">=1.37.1" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "yukka", specifier = ">=0.3.2" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "marimo", specifier = ">=0.19.6" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-mock", specifier = ">=3.14" },
+    { name = "ruff", specifier = ">=0.15.13" },
+]
+
+[[package]]
 name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://pypi.org/simple" }
@@ -1414,45 +1455,4 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/56/0c/9b1a8df7eac4a5640e15f623c7b58bb0fa4886bc66551a27bfb1d1e51b71/yukka-0.4.0.tar.gz", hash = "sha256:304949858e2843c8c60412cf1dd5fa56bd8250902a9155f30680537116fe7317", size = 224844, upload-time = "2026-05-12T16:08:53.262Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/19/26/e922d7a7664af58aefdaf03a37dfc28b1b106e7658cd6a359bdb521068d2/yukka-0.4.0-py3-none-any.whl", hash = "sha256:9b52c7a6691caddedca6e11501838bd68195cde40d71b12ee8d1b9d5324e931d", size = 91504, upload-time = "2026-05-12T16:08:51.945Z" },
-]
-
-[[package]]
-name = "yukka-interview"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "cvxpy" },
-    { name = "jquantstats" },
-    { name = "numpy" },
-    { name = "plotly" },
-    { name = "polars" },
-    { name = "python-dotenv" },
-    { name = "yukka" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "marimo" },
-    { name = "pytest" },
-    { name = "pytest-mock" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "cvxpy", specifier = ">=1.8.2" },
-    { name = "jquantstats", specifier = ">=0.8.0" },
-    { name = "numpy", specifier = ">=2.4.1" },
-    { name = "plotly", specifier = ">=6.5.2" },
-    { name = "polars", specifier = ">=1.37.1" },
-    { name = "python-dotenv", specifier = ">=1.2.2" },
-    { name = "yukka", specifier = ">=0.3.2" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "marimo", specifier = ">=0.19.6" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-mock", specifier = ">=3.14" },
-    { name = "ruff", specifier = ">=0.15.13" },
 ]

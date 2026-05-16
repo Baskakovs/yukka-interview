@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "yukka-interview"
+name = "honey"
 version = "0.1.0"
 description = "Yukka Lab interview take-home: portfolio construction and analysis"
 readme = "README.md"
