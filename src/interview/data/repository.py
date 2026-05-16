@@ -18,8 +18,9 @@ with contextlib.redirect_stdout(io.StringIO()):
 class Repository(ABC):
     """Abstract repository defining the data access interface."""
 
+    @property
     @abstractmethod
-    def assets(self, **kwargs) -> list[Asset]:
+    def assets(self) -> list[Asset]:
         """List available assets with metadata."""
         ...
 

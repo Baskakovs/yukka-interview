@@ -1,4 +1,4 @@
-.PHONY: marimo test lint
+.PHONY: marimo test lint typecheck
 
 marimo:
 	uv run marimo edit book/marimo/notebooks/Experiment1.py
@@ -9,3 +9,6 @@ test:
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
+
+typecheck:
+	uv run pyright src/

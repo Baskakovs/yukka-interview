@@ -63,4 +63,5 @@ line-ending = "auto"
     "RUF001",  # Allow ambiguous unicode in notebooks
     "RUF002",  # Allow ambiguous unicode in notebooks
     "F401",    # Allow unused imports in marimo setup blocks (used by cells)
+    "F841",    # Allow "unused" locals in marimo cells (used by other cells)
 ]
