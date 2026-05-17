@@ -86,4 +86,4 @@ make lint
 
 ## Contact
 
-If you have any questions, reach out to Peter at [peter@yukkalab.com](mailto:peter@yukkalab.com).
+If you have any questions, reach out to Peter at [pjotr.b@yukkalab.com](mailto:pjotr.b@yukkalab.com).
