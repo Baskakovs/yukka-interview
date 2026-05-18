@@ -4,7 +4,6 @@
 #     "marimo>=0.19.6",
 #     "numpy>=2.4.0",
 #     "yukka-interview",
-#     "cvxpy>=1.8.2",
 #     "jquantstats>=0.8.0",
 #     "plotly>=5.0",
 # ]
@@ -19,7 +18,6 @@ __generated_with = "0.23.6"
 app = marimo.App()
 
 with app.setup:
-    import cvxpy as cp
     import marimo as mo
     import numpy as np
     import plotly.graph_objects as go
@@ -37,16 +35,9 @@ def _():
     mo.md(r"""
     # Part 2: Momentum Strategy Benchmark
 
-    **12-1 month cross-sectional momentum** on the STOXX 600 universe (top-100
-    constituents by market-cap rank), benchmarked against the STOXX 600 index.
+    Yukka Lab produces news-sentiment scores for STOXX 600 constituents using NLP and ML. A natural benchmark for any sentiment-based strategy is pure price momentum. If sentiment cannot beat a signal that uses only past prices, it adds little value.
 
-    Jegadeesh & Titman (1993) documented that past 12-month winners continue to
-    outperform past losers over the following 3–12 months.  On STOXX 600 data,
-    the same effect provides a natural benchmark: it represents the *structural*
-    return that markets reward for holding recent winners, independent of any
-    external information signal.  Comparing the Yukka news-sentiment alpha
-    against pure price momentum reveals whether the sentiment signal is additive
-    or merely a noisy proxy for what prices already reflect.
+    This notebook implements the standard Jegadeesh & Titman (1993) 12-1 month momentum strategy on the STOXX 100 universe as that benchmark, establishing the baseline a Yukka sentiment overlay would need to outperform.
     """)
     return
 
@@ -59,8 +50,8 @@ def _():
     We load daily STOXX 600 prices from *YukkaRepository*, deduplicate any
     repeated calendar dates (keeping the last entry per day), then resample to
     **monthly frequency** by taking the last observed price in each calendar
-    month.  Stocks with more than 80 % missing values — illiquid micro-caps that
-    rarely appear in the top-100 — are dropped so the covariance matrix stays
+    month.  Stocks with more than 80 % missing values - illiquid micro-caps that
+    rarely appear in the top-100 - are dropped so the covariance matrix stays
     well-conditioned.
     """)
     return
@@ -89,7 +80,6 @@ def _():
     _n = len(_prices_m)
     _good = ["date"] + [c for c in _asset_cols_raw if _prices_m[c].null_count() / _n <= 0.80]
     prices_monthly = _prices_m.select(_good)
-
     return (prices_monthly,)
 
 
@@ -120,7 +110,6 @@ def _(prices_monthly):
         "date",
         *[(pl.col(c).shift(1) / pl.col(c).shift(12) - 1).alias(c) for c in _asset_cols],
     )
-
     return (signal,)
 
 
@@ -133,8 +122,7 @@ def _(prices_monthly, signal):
     n_ic = len(prices_monthly) - 1
     t_ic = ic * np.sqrt(n_ic - 2) / np.sqrt(max(1.0 - ic**2, 1e-12))
     p_val = 2.0 * (1.0 - t_dist.cdf(abs(t_ic), df=n_ic - 2))
-
-    return strategy, ic, n_ic, t_ic, p_val
+    return ic, n_ic, p_val, strategy, t_ic
 
 
 @app.cell(hide_code=True)
@@ -161,7 +149,7 @@ def _(ic, p_val):
     A mean IC of **{ic:.4f}** ({_sig} at the 5 % level, p = {p_val:.4f}) measures
     the average cross-sectional rank correlation between the momentum signal and
     subsequent one-month returns.  An IC in the range 0.02–0.05 is considered
-    economically meaningful in live equity strategies — modest per-period
+    economically meaningful in live equity strategies - modest per-period
     predictive skill compounds into substantial alpha when the portfolio is
     well-diversified and turnover costs are managed.
     """)
@@ -172,18 +160,7 @@ def _(ic, p_val):
 def _(strategy):
     # Min-variance optimisation with 10 % per-asset weight cap.
     _cols = strategy._asset_cols()
-    _n = len(_cols)
-    _ret = strategy._historical_returns().select(_cols).to_numpy().astype(float)
-    _valid = np.all(np.isfinite(_ret), axis=1)
-    _ret = _ret[_valid]
-    _sigma = np.cov(_ret, rowvar=False) + 1e-6 * np.eye(_n)
-
-    _w = cp.Variable(_n)
-    cp.Problem(
-        cp.Minimize(cp.quad_form(_w, _sigma)),
-        [cp.sum(_w) == 1, _w >= 0, _w <= 0.10],
-    ).solve()
-    weights = _w.value
+    weights = strategy.build_portfolio(objective="min_variance", long_only=True, max_weight=0.10)
 
     # Top-10 holdings table.
     _order = np.argsort(weights)[::-1]
@@ -198,7 +175,6 @@ def _(strategy):
     |------|--------|--------|
     {_rows}
     """)
-
     return (weights,)
 
 
@@ -221,9 +197,7 @@ def _():
 @app.cell
 def _(strategy, weights):
     # Portfolio forward returns aligned with the price dates.
-    _cols = strategy._asset_cols()
-    _fwd = strategy._forward_returns().select(_cols).to_numpy().astype(float)
-    _port_ret = _fwd @ weights
+    _port_ret = strategy._portfolio_forward_returns(weights)
     _dates = strategy.prices["date"].to_list()
     _port_df = pl.DataFrame({"date": _dates, "Momentum": _port_ret.tolist()})
 
@@ -239,8 +213,12 @@ def _(strategy, weights):
         .filter(pl.col("STOXX 600").is_not_null())
     )
 
-    # Align on common dates, drop any remaining nulls.
-    combined = _port_df.join(_bench_m, on="date", how="inner").drop_nulls()
+    # Align on common dates, then remove both nulls and IEEE NaNs.
+    combined = (
+        _port_df.join(_bench_m, on="date", how="inner")
+        .drop_nulls()
+        .filter(pl.all_horizontal(pl.all().exclude("date").is_finite()))
+    )
 
     # jquantstats analytics — benchmark included so stats cover both series.
     _data = Data.from_returns(
@@ -272,14 +250,13 @@ def _(strategy, weights):
     | Calmar ratio | {_calmar.get(_mom_key, float("nan")):.3f} | {_calmar.get(_bm_key, float("nan")):.3f} |
     | Max drawdown | {_mdd.get(_mom_key, float("nan")):.2%} | {_mdd.get(_bm_key, float("nan")):.2%} |
     """)
-
     return (combined,)
 
 
 @app.cell
 def _(combined):
-    _cum_mom = (1.0 + combined["Momentum"]).cumprod()
-    _cum_bench = (1.0 + combined["STOXX 600"]).cumprod()
+    _cum_mom = (1.0 + combined["Momentum"]).cum_prod()
+    _cum_bench = (1.0 + combined["STOXX 600"]).cum_prod()
     _dates = combined["date"].to_list()
 
     fig = go.Figure()
@@ -309,7 +286,7 @@ def _(combined):
     )
 
     fig
-    return (fig,)
+    return
 
 
 @app.cell(hide_code=True)

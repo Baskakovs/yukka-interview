@@ -27,6 +27,22 @@ def strategy() -> Strategy:
     return Strategy(prices=pl.DataFrame(price_data), signal=pl.DataFrame(signal_data))
 
 
+@pytest.fixture
+def sparse_strategy() -> Strategy:
+    # Sparse panel where not every asset has finite returns on the same dates.
+    dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(6)]
+    prices = pl.DataFrame(
+        {
+            "date": dates,
+            "A": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+            "B": [None, None, 50.0, 51.0, 52.0, 53.0],
+            "C": [10.0, 10.1, None, None, None, None],
+        },
+    )
+    signal = prices.select("date", pl.lit(1.0).alias("A"), pl.lit(0.5).alias("B"), pl.lit(0.0).alias("C"))
+    return Strategy(prices=prices, signal=signal)
+
+
 class TestMeanIC:
     # Tests for Strategy.mean_ic.
 
@@ -62,6 +78,13 @@ class TestBuildPortfolio:
         w = strategy.build_portfolio(objective="max_sharpe", long_only=True)
         assert np.all(w >= -1e-6)
 
+    def test_sparse_panel_drops_assets_with_insufficient_history(self, sparse_strategy: Strategy) -> None:
+        # Sparse masked panels should still produce finite weights in the original asset order.
+        w = sparse_strategy.build_portfolio(objective="min_variance", long_only=True)
+        assert abs(w.sum() - 1.0) < 1e-4
+        assert np.all(np.isfinite(w))
+        assert w[2] == 0.0
+
     def test_unknown_objective_raises(self, strategy: Strategy) -> None:
         # An unrecognised objective raises ValueError.
         with pytest.raises(ValueError, match="Unknown objective"):
@@ -78,3 +101,8 @@ class TestSharpeRatio:
     def test_returns_float_max_sharpe(self, strategy: Strategy) -> None:
         # sharpe_ratio returns a float for max_sharpe.
         assert isinstance(strategy.sharpe_ratio(objective="max_sharpe"), float)
+
+    def test_sparse_panel_returns_finite_min_variance(self, sparse_strategy: Strategy) -> None:
+        # Sparse forward returns should not become all-NaN through nan * zero weights.
+        sharpe = sparse_strategy.sharpe_ratio(objective="min_variance", long_only=True)
+        assert np.isfinite(sharpe)

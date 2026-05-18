@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import cast
 
 import cvxpy as cp
 import numpy as np
 import polars as pl
+from cvxpy.constraints.constraint import Constraint
 from scipy.stats import spearmanr
+
+_OPTIMAL_STATUSES = {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}
 
 
 @dataclass
@@ -43,6 +47,53 @@ class Strategy:
             *[(pl.col(c) / pl.col(c).shift(1) - 1).alias(c) for c in cols],
         ).slice(1)
 
+    def _return_estimates(self, min_observations: int = 2) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Estimate mean returns and covariance from a sparse returns panel.
+
+        Returns:
+            Tuple of ``(active_mask, mu, sigma)``. ``active_mask`` maps the
+            estimated assets back to the original asset column order.
+
+        Raises:
+            ValueError: If there is not enough finite return history.
+        """
+        cols = self._asset_cols()
+        ret_np = self._historical_returns().select(cols).to_numpy().astype(float)
+        finite = np.isfinite(ret_np)
+        active_mask = finite.sum(axis=0) >= min_observations
+        if not active_mask.any():
+            raise ValueError("Not enough finite return history.")  # noqa: TRY003
+
+        active_ret = ret_np[:, active_mask]
+        row_mask = np.any(np.isfinite(active_ret), axis=1)
+        active_ret = active_ret[row_mask]
+        if active_ret.shape[0] < min_observations:
+            raise ValueError("Not enough finite return history.")  # noqa: TRY003
+
+        mu = np.nanmean(active_ret, axis=0)
+        filled_ret = np.where(np.isfinite(active_ret), active_ret, mu)
+        if filled_ret.shape[1] == 1:
+            sigma = np.array([[np.var(filled_ret[:, 0], ddof=1)]])
+        else:
+            sigma = np.cov(filled_ret, rowvar=False)
+        sigma = np.atleast_2d(sigma)
+        sigma = np.nan_to_num(sigma, nan=0.0, posinf=0.0, neginf=0.0)
+        sigma = (sigma + sigma.T) / 2
+        sigma = sigma + 1e-6 * np.eye(active_mask.sum())
+
+        if not np.isfinite(mu).all() or not np.isfinite(sigma).all():
+            raise ValueError("Return estimates are not finite.")  # noqa: TRY003
+        return active_mask, mu, sigma
+
+    def _portfolio_forward_returns(self, weights: np.ndarray) -> np.ndarray:
+        """Return NaN-aware one-period-forward portfolio returns."""
+        fwd_np = self._forward_returns().select(self._asset_cols()).to_numpy().astype(float)
+        finite = np.isfinite(fwd_np)
+        weighted_returns = np.where(finite, fwd_np * weights, 0.0).sum(axis=1)
+        invested = finite & (np.abs(weights) > 0)
+        weighted_returns[~invested.any(axis=1)] = np.nan
+        return weighted_returns
+
     @property
     def mean_ic(self) -> float:  # noqa: D102
         # Mean cross-sectional Spearman IC between signal and forward returns.
@@ -56,19 +107,21 @@ class Strategy:
             if mask.sum() < 2:
                 continue
             ic, _ = spearmanr(sig_vals[mask], fwd_vals[mask])
-            ics.append(float(ic))
+            ics.append(float(np.asarray(ic).item()))
         return float(np.mean(ics)) if ics else float("nan")
 
     def build_portfolio(
         self,
         objective: str = "min_variance",
         long_only: bool = True,
+        max_weight: float | None = None,
     ) -> np.ndarray:
         """Solve Markowitz optimisation and return asset weights.
 
         Args:
             objective: ``"min_variance"`` or ``"max_sharpe"``.
             long_only: If ``True``, constrain all weights to be non-negative.
+            max_weight: Optional per-asset upper bound on the final weights.
 
         Returns:
             1-D NumPy array of weights summing to 1.
@@ -78,29 +131,44 @@ class Strategy:
         """
         cols = self._asset_cols()
         n = len(cols)
-        ret_np = self._historical_returns().select(cols).to_numpy().astype(float)
-        valid = np.all(np.isfinite(ret_np), axis=1)
-        ret_np = ret_np[valid]
-        mu = ret_np.mean(axis=0)
-        sigma = np.cov(ret_np, rowvar=False) + 1e-6 * np.eye(n)
+        active_mask, mu, sigma = self._return_estimates()
+        active_n = int(active_mask.sum())
+
+        if max_weight is not None and max_weight <= 0:
+            raise ValueError("max_weight must be positive.")  # noqa: TRY003
+
+        def _expand(active_weights: np.ndarray) -> np.ndarray:
+            weights = np.zeros(n)
+            weights[active_mask] = active_weights
+            return weights
 
         if objective == "min_variance":
-            w = cp.Variable(n)
-            constraints = [cp.sum(w) == 1]
+            w = cp.Variable(active_n)
+            constraints: list[Constraint] = [cast(Constraint, cp.sum(w) == 1)]
             if long_only:
                 constraints.append(w >= 0)
-            cp.Problem(cp.Minimize(cp.quad_form(w, sigma)), constraints).solve()
-            return w.value
+            if max_weight is not None:
+                constraints.append(w <= max_weight)
+            problem = cp.Problem(cp.Minimize(cp.quad_form(w, sigma)), constraints)
+            problem.solve()
+            if problem.status not in _OPTIMAL_STATUSES or w.value is None:
+                raise RuntimeError("Optimisation failed.")  # noqa: TRY003
+            return _expand(np.asarray(w.value, dtype=float))
 
         if objective == "max_sharpe":
-            # Charnes-Cooper transformation: μᵀy = 1, minimise yᵀΣy, then normalise to sum(w) = 1.
-            y = cp.Variable(n)
-            constraints = [mu @ y == 1]
+            # Charnes-Cooper transformation: mu.T @ y = 1, minimise y.T @ sigma @ y.
+            y = cp.Variable(active_n)
+            constraints: list[Constraint] = [cast(Constraint, mu @ y == 1)]
             if long_only:
                 constraints.append(y >= 0)
-            cp.Problem(cp.Minimize(cp.quad_form(y, sigma)), constraints).solve()
-            y_val = y.value
-            return y_val / y_val.sum()
+            if max_weight is not None:
+                constraints.append(y <= max_weight * cp.sum(y))
+            problem = cp.Problem(cp.Minimize(cp.quad_form(y, sigma)), constraints)
+            problem.solve()
+            if problem.status not in _OPTIMAL_STATUSES or y.value is None:
+                raise RuntimeError("Optimisation failed.")  # noqa: TRY003
+            y_val = np.asarray(y.value, dtype=float)
+            return _expand(y_val / y_val.sum())
 
         raise ValueError(f"Unknown objective: {objective!r}")  # noqa: TRY003
 
@@ -108,19 +176,20 @@ class Strategy:
         self,
         objective: str = "min_variance",
         long_only: bool = True,
+        max_weight: float | None = None,
     ) -> float:
         """Annualised Sharpe ratio of the optimised portfolio.
 
         Args:
             objective: Forwarded to :meth:`build_portfolio`.
             long_only: Forwarded to :meth:`build_portfolio`.
+            max_weight: Forwarded to :meth:`build_portfolio`.
 
         Returns:
             Annualised Sharpe ratio scaled by ``sqrt(12)`` for monthly data.
         """
-        weights = self.build_portfolio(objective=objective, long_only=long_only)
-        fwd_np = self._forward_returns().select(self._asset_cols()).to_numpy().astype(float)
-        port_ret = fwd_np @ weights
+        weights = self.build_portfolio(objective=objective, long_only=long_only, max_weight=max_weight)
+        port_ret = self._portfolio_forward_returns(weights)
         port_ret = port_ret[np.isfinite(port_ret)]
         if len(port_ret) < 2:
             return float("nan")
