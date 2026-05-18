@@ -17,6 +17,7 @@ __generated_with = "0.23.6"
 app = marimo.App()
 
 with app.setup:
+    from interview.strategy import Strategy
     import cvxpy as cp
     import marimo as mo
     import numpy as np
