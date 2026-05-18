@@ -293,6 +293,42 @@ def _(strategy):
 
 @app.cell
 def _(combined):
+    _dates = combined["date"].to_list()
+    turnover_fig = go.Figure()
+    turnover_fig.add_trace(
+        go.Bar(
+            x=_dates,
+            y=combined["turnover"].to_list(),
+            name="Monthly Turnover",
+            marker_color="steelblue",
+            yaxis="y",
+        )
+    )
+    turnover_fig.add_trace(
+        go.Scatter(
+            x=_dates,
+            y=combined["active_assets"].to_list(),
+            name="Active Holdings",
+            line={"color": "darkorange", "width": 2},
+            yaxis="y2",
+        )
+    )
+    turnover_fig.update_layout(
+        title="Turnover and Active Holdings",
+        xaxis_title="Date",
+        yaxis={"title": "Turnover", "tickformat": ".0%"},
+        yaxis2={"title": "Active holdings", "overlaying": "y", "side": "right"},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+        template="plotly_white",
+        height=420,
+    )
+
+    turnover_fig
+    return
+
+
+@app.cell
+def _(combined):
     _cum_mom = (1.0 + combined["Momentum"]).cum_prod()
     _cum_bench = (1.0 + combined["STOXX 600"]).cum_prod()
     _dates = combined["date"].to_list()
