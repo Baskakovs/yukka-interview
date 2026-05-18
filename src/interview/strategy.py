@@ -10,7 +10,7 @@ import cvxpy as cp
 import numpy as np
 import polars as pl
 from cvxpy.constraints.constraint import Constraint
-from scipy.stats import spearmanr
+from scipy.stats import rankdata, spearmanr
 
 _OPTIMAL_STATUSES = {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}
 
@@ -47,18 +47,20 @@ class Strategy:
             *[(pl.col(c) / pl.col(c).shift(1) - 1).alias(c) for c in cols],
         ).slice(1)
 
-    def _return_estimates(self, min_observations: int = 2) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Estimate mean returns and covariance from a sparse returns panel.
+    def _estimate_from_return_matrix(
+        self,
+        ret_np: np.ndarray,
+        min_observations: int = 2,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Estimate mean returns and covariance from a sparse NumPy return matrix.
 
         Returns:
             Tuple of ``(active_mask, mu, sigma)``. ``active_mask`` maps the
-            estimated assets back to the original asset column order.
+            estimated assets back to the input matrix column order.
 
         Raises:
             ValueError: If there is not enough finite return history.
         """
-        cols = self._asset_cols()
-        ret_np = self._historical_returns().select(cols).to_numpy().astype(float)
         finite = np.isfinite(ret_np)
         active_mask = finite.sum(axis=0) >= min_observations
         if not active_mask.any():
@@ -84,6 +86,12 @@ class Strategy:
         if not np.isfinite(mu).all() or not np.isfinite(sigma).all():
             raise ValueError("Return estimates are not finite.")  # noqa: TRY003
         return active_mask, mu, sigma
+
+    def _return_estimates(self, min_observations: int = 2) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Estimate mean returns and covariance from the full returns panel."""
+        cols = self._asset_cols()
+        ret_np = self._historical_returns().select(cols).to_numpy().astype(float)
+        return self._estimate_from_return_matrix(ret_np=ret_np, min_observations=min_observations)
 
     def _portfolio_forward_returns(self, weights: np.ndarray) -> np.ndarray:
         """Return NaN-aware one-period-forward portfolio returns."""
@@ -115,6 +123,35 @@ class Strategy:
                 return signal_values
         raise ValueError("Signal has no finite entries.")  # noqa: TRY003
 
+    def _signal_to_expected_returns(self, signal_values: np.ndarray) -> np.ndarray:
+        """Map a raw signal cross-section to positive rank scores."""
+        finite = np.isfinite(signal_values)
+        expected_returns = np.full_like(signal_values, np.nan, dtype=float)
+        if finite.any():
+            expected_returns[finite] = rankdata(signal_values[finite], method="average") / finite.sum()
+        return expected_returns
+
+    def _restrict_expected_returns(
+        self,
+        mu_full: np.ndarray,
+        active_mask: np.ndarray,
+        sigma: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Restrict expected returns and covariance to finite active assets."""
+        mu_active = mu_full[active_mask]
+        finite = np.isfinite(mu_active)
+        if not finite.any():
+            raise ValueError("No assets have finite expected returns.")  # noqa: TRY003
+        if finite.all():
+            return active_mask, mu_active, sigma
+
+        active_indices = np.where(active_mask)[0]
+        new_active_mask = np.zeros_like(active_mask)
+        new_active_mask[active_indices[finite]] = True
+        keep_idx = np.where(finite)[0]
+        sigma = sigma[np.ix_(keep_idx, keep_idx)]
+        return new_active_mask, mu_active[finite], sigma
+
     def _apply_expected_returns(
         self,
         expected_returns: str | np.ndarray,
@@ -136,9 +173,12 @@ class Strategy:
                 return active_mask, mu_hist, sigma
             if expected_returns == "signal":
                 mu_full = self._latest_signal()
+            elif expected_returns == "signal_rank":
+                mu_full = self._signal_to_expected_returns(self._latest_signal())
             else:
                 raise ValueError(  # noqa: TRY003
-                    f"Unknown expected_returns: {expected_returns!r}. Use 'historical', 'signal', or a NumPy array."
+                    f"Unknown expected_returns: {expected_returns!r}. "
+                    "Use 'historical', 'signal', 'signal_rank', or a NumPy array."
                 )
         elif isinstance(expected_returns, np.ndarray):
             if expected_returns.shape != (n,):
@@ -149,23 +189,68 @@ class Strategy:
         else:
             kind = type(expected_returns).__name__
             raise TypeError(  # noqa: TRY003
-                f"expected_returns must be 'historical', 'signal', or a NumPy array; got {kind}."
+                f"expected_returns must be 'historical', 'signal', 'signal_rank', or a NumPy array; got {kind}."
             )
 
-        mu_active = mu_full[active_mask]
-        finite = np.isfinite(mu_active)
-        if not finite.any():
-            raise ValueError("No assets have finite expected returns.")  # noqa: TRY003
-        if finite.all():
-            return active_mask, mu_active, sigma
+        return self._restrict_expected_returns(mu_full=mu_full, active_mask=active_mask, sigma=sigma)
 
-        # Tighten active_mask to drop assets with non-finite expected returns.
-        active_indices = np.where(active_mask)[0]
-        new_active_mask = np.zeros_like(active_mask)
-        new_active_mask[active_indices[finite]] = True
-        keep_idx = np.where(finite)[0]
-        sigma = sigma[np.ix_(keep_idx, keep_idx)]
-        return new_active_mask, mu_active[finite], sigma
+    def _solve_portfolio(
+        self,
+        active_mask: np.ndarray,
+        mu: np.ndarray,
+        sigma: np.ndarray,
+        objective: str,
+        long_only: bool,
+        max_weight: float | None,
+    ) -> np.ndarray:
+        """Solve the Markowitz problem for a pre-estimated active universe."""
+        n = len(self._asset_cols())
+        active_n = int(active_mask.sum())
+        if active_n == 0:
+            raise ValueError("No active assets remain.")  # noqa: TRY003
+        if max_weight is not None and max_weight <= 0:
+            raise ValueError("max_weight must be positive.")  # noqa: TRY003
+        if max_weight is not None and active_n * max_weight < 1.0 - 1e-10:
+            raise ValueError("max_weight is too low for the active universe.")  # noqa: TRY003
+
+        def _expand(active_weights: np.ndarray) -> np.ndarray:
+            weights = np.zeros(n)
+            weights[active_mask] = active_weights
+            return weights
+
+        if objective == "min_variance":
+            w = cp.Variable(active_n)
+            constraints: list[Constraint] = [cast(Constraint, cp.sum(w) == 1)]
+            if long_only:
+                constraints.append(w >= 0)
+            if max_weight is not None:
+                constraints.append(w <= max_weight)
+            problem = cp.Problem(cp.Minimize(cp.quad_form(w, sigma)), constraints)
+            problem.solve()
+            if problem.status not in _OPTIMAL_STATUSES or w.value is None:
+                raise RuntimeError("Optimisation failed.")  # noqa: TRY003
+            return _expand(np.asarray(w.value, dtype=float))
+
+        if objective == "max_sharpe":
+            if long_only and np.nanmax(mu) <= 0:
+                raise ValueError("Long-only max_sharpe requires at least one positive expected return.")  # noqa: TRY003
+            # Charnes-Cooper transformation: mu.T @ y = 1, minimise y.T @ sigma @ y.
+            y = cp.Variable(active_n)
+            constraints = [cast(Constraint, mu @ y == 1)]
+            if long_only:
+                constraints.append(y >= 0)
+            if max_weight is not None:
+                constraints.append(y <= max_weight * cp.sum(y))
+            problem = cp.Problem(cp.Minimize(cp.quad_form(y, sigma)), constraints)
+            problem.solve()
+            if problem.status not in _OPTIMAL_STATUSES or y.value is None:
+                raise RuntimeError("Optimisation failed.")  # noqa: TRY003
+            y_val = np.asarray(y.value, dtype=float)
+            if abs(y_val.sum()) <= 1e-12:
+                raise RuntimeError("Optimisation returned zero-sum weights.")  # noqa: TRY003
+            return _expand(y_val / y_val.sum())
+
+        raise ValueError(f"Unknown objective: {objective!r}")  # noqa: TRY003
 
     @property
     def mean_ic(self) -> float:  # noqa: D102
@@ -202,6 +287,8 @@ class Strategy:
                 - ``None`` / ``"historical"`` (default): historical sample mean
                   of per-asset returns.
                 - ``"signal"``: latest cross-section of ``self.signal``.
+                - ``"signal_rank"``: positive ranks of the latest signal
+                  cross-section.
                 - 1-D ``np.ndarray`` of length ``len(asset_cols)``: used as-is.
 
                 Assets with NaN expected returns are excluded from the
@@ -214,12 +301,7 @@ class Strategy:
             ValueError: If *objective* or *expected_returns* is invalid, or if
                 no active assets remain after masking.
         """
-        cols = self._asset_cols()
-        n = len(cols)
         active_mask, mu, sigma = self._return_estimates()
-
-        if max_weight is not None and max_weight <= 0:
-            raise ValueError("max_weight must be positive.")  # noqa: TRY003
 
         if objective == "max_sharpe" and expected_returns is not None:
             active_mask, mu, sigma = self._apply_expected_returns(
@@ -228,42 +310,131 @@ class Strategy:
                 sigma=sigma,
             )
 
-        active_n = int(active_mask.sum())
+        return self._solve_portfolio(
+            active_mask=active_mask,
+            mu=mu,
+            sigma=sigma,
+            objective=objective,
+            long_only=long_only,
+            max_weight=max_weight,
+        )
 
-        def _expand(active_weights: np.ndarray) -> np.ndarray:
-            weights = np.zeros(n)
-            weights[active_mask] = active_weights
-            return weights
+    def backtest_rebalanced(
+        self,
+        objective: str = "max_sharpe",
+        long_only: bool = True,
+        max_weight: float | None = None,
+        expected_returns: str = "signal_rank",
+        lookback: int = 36,
+        min_observations: int = 12,
+        transaction_cost_bps: float = 0.0,
+        return_col: str = "strategy",
+    ) -> pl.DataFrame:
+        """Backtest a monthly rebalanced strategy without look-ahead.
 
-        if objective == "min_variance":
-            w = cp.Variable(active_n)
-            constraints: list[Constraint] = [cast(Constraint, cp.sum(w) == 1)]
-            if long_only:
-                constraints.append(w >= 0)
-            if max_weight is not None:
-                constraints.append(w <= max_weight)
-            problem = cp.Problem(cp.Minimize(cp.quad_form(w, sigma)), constraints)
-            problem.solve()
-            if problem.status not in _OPTIMAL_STATUSES or w.value is None:
-                raise RuntimeError("Optimisation failed.")  # noqa: TRY003
-            return _expand(np.asarray(w.value, dtype=float))
+        At each date ``t``, the method estimates risk from returns observed up
+        to ``t``, uses the signal cross-section available at ``t`` as the
+        expected-return proxy, solves the requested portfolio, and applies those
+        weights to returns from ``t`` to ``t+1``.
 
-        if objective == "max_sharpe":
-            # Charnes-Cooper transformation: mu.T @ y = 1, minimise y.T @ sigma @ y.
-            y = cp.Variable(active_n)
-            constraints: list[Constraint] = [cast(Constraint, mu @ y == 1)]
-            if long_only:
-                constraints.append(y >= 0)
-            if max_weight is not None:
-                constraints.append(y <= max_weight * cp.sum(y))
-            problem = cp.Problem(cp.Minimize(cp.quad_form(y, sigma)), constraints)
-            problem.solve()
-            if problem.status not in _OPTIMAL_STATUSES or y.value is None:
-                raise RuntimeError("Optimisation failed.")  # noqa: TRY003
-            y_val = np.asarray(y.value, dtype=float)
-            return _expand(y_val / y_val.sum())
+        Args:
+            objective: ``"min_variance"`` or ``"max_sharpe"``.
+            long_only: If ``True``, constrain all weights to be non-negative.
+            max_weight: Optional per-asset upper bound.
+            expected_returns: ``"historical"``, ``"signal"``, or
+                ``"signal_rank"``. ``"signal_rank"`` is the default because it
+                keeps the expected-return proxy positive for long-only
+                max-Sharpe optimisation.
+            lookback: Number of trailing periods used to estimate covariance.
+            min_observations: Minimum finite trailing returns required per asset.
+            transaction_cost_bps: One-way transaction cost in basis points,
+                charged as ``turnover * transaction_cost_bps / 10_000``.
+            return_col: Name of the strategy return column.
 
-        raise ValueError(f"Unknown objective: {objective!r}")  # noqa: TRY003
+        Returns:
+            DataFrame with net returns and rebalance diagnostics.
+        """
+        if lookback < min_observations:
+            raise ValueError("lookback must be >= min_observations.")  # noqa: TRY003
+        if expected_returns not in {"historical", "signal", "signal_rank"}:
+            raise ValueError(f"Unknown expected_returns: {expected_returns!r}")  # noqa: TRY003
+        if transaction_cost_bps < 0:
+            raise ValueError("transaction_cost_bps must be non-negative.")  # noqa: TRY003
+
+        cols = self._asset_cols()
+        dates = self.prices["date"].to_list()
+        hist_ret = self._historical_returns().select(cols).to_numpy().astype(float)
+        fwd_ret = self._forward_returns().select(cols).to_numpy().astype(float)
+        signal_np = self.signal.select(cols).to_numpy().astype(float)
+        cost_rate = transaction_cost_bps / 10_000.0
+        previous_weights = np.zeros(len(cols))
+
+        out_dates = []
+        out_returns = []
+        out_gross_returns = []
+        out_costs = []
+        out_turnover = []
+        out_active_assets = []
+        for row_idx in range(1, len(dates) - 1):
+            window_start = max(0, row_idx - lookback)
+            trailing_ret = hist_ret[window_start:row_idx]
+            try:
+                active_mask, mu, sigma = self._estimate_from_return_matrix(
+                    ret_np=trailing_ret,
+                    min_observations=min_observations,
+                )
+                if objective == "max_sharpe" and expected_returns != "historical":
+                    if expected_returns == "signal":
+                        mu_full = signal_np[row_idx]
+                    else:
+                        mu_full = self._signal_to_expected_returns(signal_np[row_idx])
+                    active_mask, mu, sigma = self._restrict_expected_returns(
+                        mu_full=mu_full,
+                        active_mask=active_mask,
+                        sigma=sigma,
+                    )
+
+                weights = self._solve_portfolio(
+                    active_mask=active_mask,
+                    mu=mu,
+                    sigma=sigma,
+                    objective=objective,
+                    long_only=long_only,
+                    max_weight=max_weight,
+                )
+            except (RuntimeError, ValueError):
+                continue
+
+            period_ret = fwd_ret[row_idx]
+            tradable = np.isfinite(period_ret) & (np.abs(weights) > 1e-12)
+            if not tradable.any():
+                continue
+            realised_weights = np.where(tradable, weights, 0.0)
+            weight_sum = realised_weights.sum()
+            if abs(weight_sum) <= 1e-12:
+                continue
+            realised_weights = realised_weights / weight_sum
+            turnover = float(np.abs(realised_weights - previous_weights).sum())
+            transaction_cost = turnover * cost_rate
+            gross_return = float(period_ret[tradable] @ realised_weights[tradable])
+            out_dates.append(dates[row_idx + 1])
+            out_returns.append(gross_return - transaction_cost)
+            out_gross_returns.append(gross_return)
+            out_costs.append(transaction_cost)
+            out_turnover.append(turnover)
+            out_active_assets.append(int(tradable.sum()))
+            previous_weights = realised_weights
+
+        return pl.DataFrame(
+            {
+                "date": out_dates,
+                return_col: out_returns,
+                f"{return_col}_gross": out_gross_returns,
+                "transaction_cost": out_costs,
+                "turnover": out_turnover,
+                "active_assets": out_active_assets,
+            }
+        )
 
     def sharpe_ratio(
         self,

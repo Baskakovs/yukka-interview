@@ -50,9 +50,8 @@ def _():
     We load daily STOXX 600 prices from *YukkaRepository*, deduplicate any
     repeated calendar dates (keeping the last entry per day), then resample to
     **monthly frequency** by taking the last observed price in each calendar
-    month.  Stocks with more than 80 % missing values - illiquid micro-caps that
-    rarely appear in the top-100 - are dropped so the covariance matrix stays
-    well-conditioned.
+    month.  We keep the full masked column universe and let the monthly
+    rebalance logic decide which assets have enough as-of trailing history.
     """)
     return
 
@@ -76,10 +75,8 @@ def _():
         .rename({"month": "date"})
     )
 
-    # Drop columns with > 80 % nulls (stocks rarely in top-100).
-    _n = len(_prices_m)
-    _good = ["date"] + [c for c in _asset_cols_raw if _prices_m[c].null_count() / _n <= 0.80]
-    prices_monthly = _prices_m.select(_good)
+    # Keep the full rank-masked universe; no full-sample availability filter.
+    prices_monthly = _prices_m
     return (prices_monthly,)
 
 
@@ -158,25 +155,25 @@ def _(ic, p_val):
 
 @app.cell
 def _(strategy):
-    # Signal-tilted max-Sharpe: latest 12-1 momentum cross-section as mu,
-    # historical covariance as risk model, 10 % per-asset weight cap.
+    # Latest rebalance snapshot for interpretability. The performance backtest
+    # below re-solves the portfolio at each month instead of reusing this vector.
     _cols = strategy._asset_cols()
     weights = strategy.build_portfolio(
         objective="max_sharpe",
         long_only=True,
         max_weight=0.10,
-        expected_returns="signal",
+        expected_returns="signal_rank",
     )
 
     # Top-10 holdings table.
     _order = np.argsort(weights)[::-1]
     _rows = "\n".join(f"| {i + 1} | {_cols[j]} | {weights[j]:.2%} |" for i, j in enumerate(_order[:10]))
     mo.md(rf"""
-    ### Portfolio: Momentum-Tilted Max-Sharpe, 10 % Weight Cap
+    ### Latest Rebalance Snapshot
 
-    Markowitz max-Sharpe optimisation with the latest 12-1 momentum
-    cross-section $\hat{{\mu}}$ as the expected-return proxy, constrained to
-    $w_i \in [0,\, 0.10]$ and $\sum_i w_i = 1$.
+    The table shows the latest available momentum-tilted max-Sharpe portfolio.
+    The backtest below rebalances monthly; it does not hold this final
+    snapshot through the full history.
 
     | Rank | Ticker | Weight |
     |------|--------|--------|
@@ -191,33 +188,36 @@ def _():
     ## Combining Signal and Risk Model
 
     The momentum signal serves as the **expected-return proxy** while the
-    historical covariance matrix $\Sigma$ controls **risk**.  Concretely, the
-    latest 12-1 momentum cross-section $\hat{\mu}$ enters the optimisation
-    through the Charnes-Cooper convex reformulation of max-Sharpe:
+    historical covariance matrix $\Sigma$ controls **risk**. At each monthly
+    rebalance date $t$, the strategy uses only information available at that
+    date: the contemporaneous 12-1 momentum rank $\hat{\mu}_t$ and a trailing
+    covariance estimate $\Sigma_t$.
 
     $$
-    \min_w \; w^{\top} \Sigma w \quad \text{s.t.} \quad \hat{\mu}^{\top} w = 1,\; w \geq 0,\; w \leq 0.10
+    \min_w \; w^{\top} \Sigma_t w \quad \text{s.t.} \quad \hat{\mu}_t^{\top} w = 1,\; w \geq 0,\; w \leq 0.10
     $$
 
-    The resulting weights are then normalised to sum to 1.  This is the
-    standard *signal-tilted* mean-variance portfolio: it tilts toward
-    high-momentum names (signal) while controlling concentration and pairwise
-    co-movement (risk model + 10 % cap).
-
-    Compared to a pure min-variance portfolio — which ignores $\hat{\mu}$
-    entirely — this construction actually trades the alpha that the IC
-    measured upstream, so its backtested performance is a meaningful answer
-    to "does the signal pay?".
+    The resulting weights are normalised to sum to 1 and applied to the next
+    month's returns. This removes the look-ahead bias of fitting one final
+    portfolio and replaying it over the whole history.
     """)
     return
 
 
 @app.cell
-def _(strategy, weights):
-    # Portfolio forward returns aligned with the price dates.
-    _port_ret = strategy._portfolio_forward_returns(weights)
-    _dates = strategy.prices["date"].to_list()
-    _port_df = pl.DataFrame({"date": _dates, "Momentum": _port_ret.tolist()})
+def _(strategy):
+    # Monthly rebalanced, as-of backtest. Each row is labelled by the return
+    # realisation month, matching the benchmark return dates below.
+    _strategy_returns = strategy.backtest_rebalanced(
+        objective="max_sharpe",
+        long_only=True,
+        max_weight=0.10,
+        expected_returns="signal_rank",
+        lookback=36,
+        min_observations=12,
+        transaction_cost_bps=10.0,
+        return_col="Momentum",
+    )
 
     # STOXX 600 benchmark: daily prices → monthly returns.
     _bench_raw = pl.read_parquet(CACHE_DIR / "benchmarks.parquet")
@@ -233,7 +233,7 @@ def _(strategy, weights):
 
     # Align on common dates, then remove both nulls and IEEE NaNs.
     combined = (
-        _port_df.join(_bench_m, on="date", how="inner")
+        _strategy_returns.join(_bench_m, on="date", how="inner")
         .drop_nulls()
         .filter(pl.all_horizontal(pl.all().exclude("date").is_finite()))
     )
@@ -255,9 +255,18 @@ def _(strategy, weights):
 
     _mom_key = "Momentum"
     _bm_key = "STOXX 600"
+    _attempted = max(strategy.prices.height - 2, 0)
+    _successful = _strategy_returns.height
+    _skipped = _attempted - _successful
+    _avg_turnover = _strategy_returns["turnover"].mean()
+    _avg_active = _strategy_returns["active_assets"].mean()
+    _avg_cost_bps = _strategy_returns["transaction_cost"].mean() * 10_000
 
     mo.md(rf"""
     ### Performance Analytics
+
+    Momentum returns are shown net of a simple 10 bps one-way transaction-cost
+    assumption applied to monthly turnover.
 
     | Metric | Momentum | STOXX 600 |
     |--------|----------|-----------|
@@ -267,6 +276,17 @@ def _(strategy, weights):
     | Sortino ratio | {_sortino.get(_mom_key, float("nan")):.3f} | {_sortino.get(_bm_key, float("nan")):.3f} |
     | Calmar ratio | {_calmar.get(_mom_key, float("nan")):.3f} | {_calmar.get(_bm_key, float("nan")):.3f} |
     | Max drawdown | {_mdd.get(_mom_key, float("nan")):.2%} | {_mdd.get(_bm_key, float("nan")):.2%} |
+
+    ### Rebalance Diagnostics
+
+    | Diagnostic | Value |
+    |------------|-------|
+    | Attempted rebalances | {_attempted} |
+    | Successful rebalances | {_successful} |
+    | Skipped rebalances | {_skipped} |
+    | Average active holdings | {_avg_active:.1f} |
+    | Average monthly turnover | {_avg_turnover:.2f} |
+    | Average transaction cost | {_avg_cost_bps:.1f} bps |
     """)
     return (combined,)
 
@@ -314,31 +334,27 @@ def _():
 
     **Limitations**
 
-    - *No transaction-cost model.* Monthly rebalancing of ~100 names incurs
-      meaningful slippage; a realistic backtest should deduct at least 5–10 bps
-      per trade, reducing reported returns noticeably.
-    - *Survivorship-adjacent bias.* Filtering by STOXX 100 rank uses the
-      full-sample rank file; stocks that later dropped out of the index may be
-      underrepresented in the early period.
-    - *Single covariance window.* The covariance matrix is estimated over the
-      entire history, mixing volatility regimes.  Weights optimised on a calm
-      period may be dangerously concentrated when a crisis arrives.
+    - *Simple transaction-cost model.* The 10 bps turnover charge is a rough
+      implementation haircut; a realistic model would vary by liquidity,
+      spread, and trade size.
+    - *Universe construction risk.* The notebook assumes the rank data used by
+      ``rank_range=(1, 100)`` is historical/as-of. If the rank file itself were
+      rebuilt with hindsight, the universe would inherit that bias.
+    - *Simple covariance model.* The covariance matrix uses a trailing sample
+      covariance with light missing-data handling; a production risk model
+      would use explicit shrinkage and more careful treatment of sparse assets.
 
     **Natural Extensions**
 
-    1. **Rolling rebalance.** The current backtest holds the *final* signal-tilted
-       weights fixed across history.  A realistic backtest would re-solve the
-       max-Sharpe problem each month with the contemporaneous signal cross-section
-       and rolling covariance — the natural next step.
+    1. **Transaction-cost-aware optimisation.** Add a penalty term
+       $\gamma \|w - w_{\text{prev}}\|_1$ to the objective to reduce turnover
+       while maintaining the momentum tilt.
     2. **Yukka sentiment overlay.** Replace or augment the price-momentum signal
        with Yukka's news-sentiment score.  If the IC of the sentiment signal is
        orthogonal to price momentum, a combined signal yields higher risk-adjusted
        returns with no additional turnover.
-    3. **Rolling covariance.** Use a 36- or 60-month expanding or rolling window
-       to track regime changes rather than relying on the full-sample estimate.
-    4. **Transaction-cost-aware rebalancing.** Add a penalty term
-       $\gamma \|w - w_{\text{prev}}\|_1$ to the objective to reduce turnover
-       while maintaining the momentum tilt.
+    3. **Risk-model tuning.** Sweep the covariance lookback, shrinkage method,
+       and per-name cap to test whether results are robust.
     """)
     return
 

@@ -112,6 +112,18 @@ class TestExpectedReturns:
         assert np.all(w >= -1e-6)
         assert np.all(w <= 0.5 + 1e-6)
 
+    def test_signal_rank_produces_valid_weights(self, strategy: Strategy) -> None:
+        # signal_rank maps the signal cross-section to positive rank scores.
+        w = strategy.build_portfolio(
+            objective="max_sharpe",
+            long_only=True,
+            max_weight=0.5,
+            expected_returns="signal_rank",
+        )
+        assert abs(w.sum() - 1.0) < 1e-4
+        assert np.all(w >= -1e-6)
+        assert np.all(w <= 0.5 + 1e-6)
+
     def test_array_produces_valid_weights(self, strategy: Strategy) -> None:
         # max_sharpe with an explicit mu array returns valid weights.
         cols = strategy._asset_cols()
@@ -185,3 +197,60 @@ class TestSharpeRatio:
         # Sparse forward returns should not become all-NaN through nan * zero weights.
         sharpe = sparse_strategy.sharpe_ratio(objective="min_variance", long_only=True)
         assert np.isfinite(sharpe)
+
+
+class TestRebalancedBacktest:
+    # Tests for Strategy.backtest_rebalanced.
+
+    def test_returns_finite_dataframe(self, strategy: Strategy) -> None:
+        # Rebalanced backtest returns dated finite strategy returns.
+        result = strategy.backtest_rebalanced(
+            objective="max_sharpe",
+            long_only=True,
+            max_weight=0.5,
+            expected_returns="signal_rank",
+            lookback=10,
+            min_observations=3,
+            return_col="Momentum",
+        )
+        assert result.columns == [
+            "date",
+            "Momentum",
+            "Momentum_gross",
+            "transaction_cost",
+            "turnover",
+            "active_assets",
+        ]
+        assert result.height > 0
+        assert result["Momentum"].is_finite().all()
+        assert result["Momentum_gross"].is_finite().all()
+        assert result["turnover"].is_finite().all()
+        assert result["active_assets"].min() > 0
+
+    def test_transaction_cost_reduces_returns(self, strategy: Strategy) -> None:
+        # Transaction costs are deducted from gross returns using reported turnover.
+        result = strategy.backtest_rebalanced(
+            max_weight=0.5,
+            lookback=10,
+            min_observations=3,
+            transaction_cost_bps=10.0,
+        )
+        diff = result["strategy_gross"] - result["strategy"]
+        expected_cost = result["turnover"] * 10.0 / 10_000.0
+        np.testing.assert_allclose(diff.to_numpy(), expected_cost.to_numpy(), atol=1e-12)
+
+    def test_trailing_empty_signal_rows_do_not_fail(self) -> None:
+        # A partial latest month with no signal should not break earlier rebalances.
+        n_dates = 24
+        dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(n_dates)]
+        rng = np.random.default_rng(31)
+        prices = {"date": dates}
+        signal: dict = {"date": dates}
+        for name in ["A", "B", "C", "D"]:
+            prices[name] = (100.0 * np.exp(np.cumsum(rng.normal(0.01, 0.02, n_dates)))).tolist()
+            signal[name] = rng.normal(0, 1, n_dates).tolist()
+            signal[name][-1] = None
+        s = Strategy(prices=pl.DataFrame(prices), signal=pl.DataFrame(signal))
+        result = s.backtest_rebalanced(max_weight=0.5, lookback=10, min_observations=3)
+        assert result.height > 0
+        assert result["strategy"].is_finite().all()
