@@ -91,6 +91,85 @@ class TestBuildPortfolio:
             strategy.build_portfolio(objective="invalid")
 
 
+class TestExpectedReturns:
+    # Tests for the expected_returns parameter on build_portfolio.
+
+    def test_historical_default_matches_explicit(self, strategy: Strategy) -> None:
+        # expected_returns=None and "historical" produce identical weights.
+        w_default = strategy.build_portfolio(objective="max_sharpe", long_only=True)
+        w_explicit = strategy.build_portfolio(objective="max_sharpe", long_only=True, expected_returns="historical")
+        np.testing.assert_allclose(w_default, w_explicit, atol=1e-6)
+
+    def test_signal_produces_valid_weights(self, strategy: Strategy) -> None:
+        # max_sharpe with expected_returns="signal" returns valid weights.
+        w = strategy.build_portfolio(
+            objective="max_sharpe",
+            long_only=True,
+            max_weight=0.5,
+            expected_returns="signal",
+        )
+        assert abs(w.sum() - 1.0) < 1e-4
+        assert np.all(w >= -1e-6)
+        assert np.all(w <= 0.5 + 1e-6)
+
+    def test_array_produces_valid_weights(self, strategy: Strategy) -> None:
+        # max_sharpe with an explicit mu array returns valid weights.
+        cols = strategy._asset_cols()
+        mu = np.linspace(0.01, 0.05, len(cols))
+        w = strategy.build_portfolio(objective="max_sharpe", long_only=True, expected_returns=mu)
+        assert abs(w.sum() - 1.0) < 1e-4
+        assert np.all(w >= -1e-6)
+
+    def test_min_variance_ignores_expected_returns(self, strategy: Strategy) -> None:
+        # min_variance result is unchanged by expected_returns parameter.
+        w_plain = strategy.build_portfolio(objective="min_variance", long_only=True)
+        w_with_mu = strategy.build_portfolio(objective="min_variance", long_only=True, expected_returns="signal")
+        np.testing.assert_allclose(w_plain, w_with_mu, atol=1e-6)
+
+    def test_nan_signal_entries_excluded(self) -> None:
+        # Assets with NaN signal at the latest cross-section get zero weight.
+        n_dates = 20
+        dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(n_dates)]
+        rng = np.random.default_rng(7)
+        prices = {"date": dates}
+        signal: dict = {"date": dates}
+        for name in ["A", "B", "C"]:
+            prices[name] = (100.0 * np.exp(np.cumsum(rng.normal(0.01, 0.02, n_dates)))).tolist()
+            signal[name] = rng.normal(0, 1, n_dates).tolist()
+        # Force C's latest signal to None — should be masked out.
+        signal["C"][-1] = None
+        s = Strategy(prices=pl.DataFrame(prices), signal=pl.DataFrame(signal))
+        w = s.build_portfolio(objective="max_sharpe", long_only=True, expected_returns="signal")
+        assert abs(w.sum() - 1.0) < 1e-4
+        assert w[2] == 0.0
+
+    def test_trailing_empty_signal_row_uses_latest_finite_row(self) -> None:
+        # Trailing all-null signal rows can appear when the latest price month is partial.
+        n_dates = 20
+        dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(n_dates)]
+        rng = np.random.default_rng(17)
+        prices = {"date": dates}
+        signal: dict = {"date": dates}
+        for name in ["A", "B", "C"]:
+            prices[name] = (100.0 * np.exp(np.cumsum(rng.normal(0.01, 0.02, n_dates)))).tolist()
+            signal[name] = rng.normal(0, 1, n_dates).tolist()
+            signal[name][-1] = None
+        s = Strategy(prices=pl.DataFrame(prices), signal=pl.DataFrame(signal))
+        w = s.build_portfolio(objective="max_sharpe", long_only=True, expected_returns="signal")
+        assert abs(w.sum() - 1.0) < 1e-4
+        assert np.all(np.isfinite(w))
+
+    def test_invalid_string_raises(self, strategy: Strategy) -> None:
+        # An unrecognised expected_returns string raises ValueError.
+        with pytest.raises(ValueError, match="Unknown expected_returns"):
+            strategy.build_portfolio(objective="max_sharpe", expected_returns="bogus")
+
+    def test_wrong_shape_array_raises(self, strategy: Strategy) -> None:
+        # A NumPy array of the wrong shape raises ValueError.
+        with pytest.raises(ValueError, match="expected_returns array must have shape"):
+            strategy.build_portfolio(objective="max_sharpe", expected_returns=np.array([1.0, 2.0]))
+
+
 class TestSharpeRatio:
     # Tests for Strategy.sharpe_ratio.
 

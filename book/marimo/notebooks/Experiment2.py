@@ -158,17 +158,24 @@ def _(ic, p_val):
 
 @app.cell
 def _(strategy):
-    # Min-variance optimisation with 10 % per-asset weight cap.
+    # Signal-tilted max-Sharpe: latest 12-1 momentum cross-section as mu,
+    # historical covariance as risk model, 10 % per-asset weight cap.
     _cols = strategy._asset_cols()
-    weights = strategy.build_portfolio(objective="min_variance", long_only=True, max_weight=0.10)
+    weights = strategy.build_portfolio(
+        objective="max_sharpe",
+        long_only=True,
+        max_weight=0.10,
+        expected_returns="signal",
+    )
 
     # Top-10 holdings table.
     _order = np.argsort(weights)[::-1]
     _rows = "\n".join(f"| {i + 1} | {_cols[j]} | {weights[j]:.2%} |" for i, j in enumerate(_order[:10]))
     mo.md(rf"""
-    ### Portfolio: Min-Variance, 10 % Weight Cap
+    ### Portfolio: Momentum-Tilted Max-Sharpe, 10 % Weight Cap
 
-    Markowitz minimum-variance optimisation constrained to
+    Markowitz max-Sharpe optimisation with the latest 12-1 momentum
+    cross-section $\hat{{\mu}}$ as the expected-return proxy, constrained to
     $w_i \in [0,\, 0.10]$ and $\sum_i w_i = 1$.
 
     | Rank | Ticker | Weight |
@@ -181,15 +188,26 @@ def _(strategy):
 @app.cell(hide_code=True)
 def _():
     mo.md(r"""
-    ## Signal vs Optimiser
+    ## Combining Signal and Risk Model
 
-    The momentum signal ranks assets by recent price performance; the optimiser
-    selects weights to minimise portfolio variance.  These two objectives are
-    **orthogonal**: the optimiser does not tilt toward high-IC momentum names.
-    A natural extension is *signal-tilted* optimisation, which adds
-    $-\lambda\,\hat{\mu}^{\top} w$ to the objective (where $\hat{\mu}$ is the
-    signal-implied expected return), blending alpha capture with risk control
-    along the full mean-variance frontier.
+    The momentum signal serves as the **expected-return proxy** while the
+    historical covariance matrix $\Sigma$ controls **risk**.  Concretely, the
+    latest 12-1 momentum cross-section $\hat{\mu}$ enters the optimisation
+    through the Charnes-Cooper convex reformulation of max-Sharpe:
+
+    $$
+    \min_w \; w^{\top} \Sigma w \quad \text{s.t.} \quad \hat{\mu}^{\top} w = 1,\; w \geq 0,\; w \leq 0.10
+    $$
+
+    The resulting weights are then normalised to sum to 1.  This is the
+    standard *signal-tilted* mean-variance portfolio: it tilts toward
+    high-momentum names (signal) while controlling concentration and pairwise
+    co-movement (risk model + 10 % cap).
+
+    Compared to a pure min-variance portfolio — which ignores $\hat{\mu}$
+    entirely — this construction actually trades the alpha that the IC
+    measured upstream, so its backtested performance is a meaningful answer
+    to "does the signal pay?".
     """)
     return
 
@@ -308,9 +326,10 @@ def _():
 
     **Natural Extensions**
 
-    1. **Signal-tilted optimisation.** Add $-\lambda\,\hat{\mu}^{\top} w$ to the
-       objective to align the optimiser with the momentum ranking, sweeping
-       $\lambda$ to trace the mean-variance frontier.
+    1. **Rolling rebalance.** The current backtest holds the *final* signal-tilted
+       weights fixed across history.  A realistic backtest would re-solve the
+       max-Sharpe problem each month with the contemporaneous signal cross-section
+       and rolling covariance — the natural next step.
     2. **Yukka sentiment overlay.** Replace or augment the price-momentum signal
        with Yukka's news-sentiment score.  If the IC of the sentiment signal is
        orthogonal to price momentum, a combined signal yields higher risk-adjusted
