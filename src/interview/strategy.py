@@ -24,11 +24,11 @@ class Strategy:
     signal: pl.DataFrame
 
     def _asset_cols(self) -> list[str]:
-        """Return column names excluding the date column."""
+        # Return column names excluding the date column.
         return [c for c in self.prices.columns if c != "date"]
 
     def _forward_returns(self) -> pl.DataFrame:
-        """Return fwd_ret[t] = price[t+1] / price[t] - 1 (last row is null)."""
+        # Return fwd_ret[t] = price[t+1] / price[t] - 1 (last row is null).
         cols = self._asset_cols()
         return self.prices.select(
             "date",
@@ -36,7 +36,7 @@ class Strategy:
         )
 
     def _historical_returns(self) -> pl.DataFrame:
-        """Return ret[t] = price[t] / price[t-1] - 1 with the first (null) row dropped."""
+        # Return ret[t] = price[t] / price[t-1] - 1 with the first (null) row dropped.
         cols = self._asset_cols()
         return self.prices.select(
             "date",
@@ -44,8 +44,8 @@ class Strategy:
         ).slice(1)
 
     @property
-    def mean_ic(self) -> float:
-        """Mean cross-sectional Spearman IC between signal and forward returns."""
+    def mean_ic(self) -> float:  # noqa: D102
+        # Mean cross-sectional Spearman IC between signal and forward returns.
         fwd = self._forward_returns()
         cols = self._asset_cols()
         ics: list[float] = []
@@ -93,7 +93,7 @@ class Strategy:
             return w.value
 
         if objective == "max_sharpe":
-            # Charnes-Cooper transformation: fix μᵀy = 1, minimise yᵀΣy, then normalise to sum(w) = 1.
+            # Charnes-Cooper transformation: μᵀy = 1, minimise yᵀΣy, then normalise to sum(w) = 1.
             y = cp.Variable(n)
             constraints = [mu @ y == 1]
             if long_only:
