@@ -97,9 +97,12 @@ class Strategy:
         """Return NaN-aware one-period-forward portfolio returns."""
         fwd_np = self._forward_returns().select(self._asset_cols()).to_numpy().astype(float)
         finite = np.isfinite(fwd_np)
-        weighted_returns = np.where(finite, fwd_np * weights, 0.0).sum(axis=1)
-        invested = finite & (np.abs(weights) > 0)
-        weighted_returns[~invested.any(axis=1)] = np.nan
+        available_weights = np.where(finite, weights, 0.0)
+        exposure = available_weights.sum(axis=1)
+        weighted_returns = np.full(fwd_np.shape[0], np.nan)
+        has_exposure = np.abs(exposure) > 1e-12
+        period_returns = np.where(finite, fwd_np * weights, 0.0).sum(axis=1)
+        weighted_returns[has_exposure] = period_returns[has_exposure] / exposure[has_exposure]
         return weighted_returns
 
     def _latest_signal(self) -> np.ndarray:
@@ -264,8 +267,12 @@ class Strategy:
             mask = np.isfinite(sig_vals) & np.isfinite(fwd_vals)
             if mask.sum() < 2:
                 continue
+            if np.unique(sig_vals[mask]).size < 2 or np.unique(fwd_vals[mask]).size < 2:
+                continue
             ic, _ = spearmanr(sig_vals[mask], fwd_vals[mask])
-            ics.append(float(np.asarray(ic).item()))
+            ic_value = float(np.asarray(ic).item())
+            if np.isfinite(ic_value):
+                ics.append(ic_value)
         return float(np.mean(ics)) if ics else float("nan")
 
     def build_portfolio(

@@ -37,7 +37,7 @@ def _():
 
     Yukka Lab produces news-sentiment scores for STOXX 600 constituents using NLP and ML. A natural benchmark for any sentiment-based strategy is pure price momentum. If sentiment cannot beat a signal that uses only past prices, it adds little value.
 
-    This notebook implements the standard Jegadeesh & Titman (1993) 12-1 month momentum strategy on the STOXX 100 universe as that benchmark, establishing the baseline a Yukka sentiment overlay would need to outperform.
+    I implemented the standard Jegadeesh & Titman 12-1 month momentum strategy on the top-100 STOXX 600 names by market-cap rank, establishing the baseline.
     """)
     return
 
@@ -47,10 +47,10 @@ def _():
     mo.md(r"""
     ## Data
 
-    We load daily STOXX 600 prices from *YukkaRepository*, deduplicate any
+    Load daily STOXX 600 prices from *YukkaRepository*, deduplicate any
     repeated calendar dates (keeping the last entry per day), then resample to
     **monthly frequency** by taking the last observed price in each calendar
-    month.  We keep the full masked column universe and let the monthly
+    month.  Keep the full masked column universe and let the monthly
     rebalance logic decide which assets have enough as-of trailing history.
     """)
     return
@@ -145,10 +145,7 @@ def _(ic, p_val):
 
     A mean IC of **{ic:.4f}** ({_sig} at the 5 % level, p = {p_val:.4f}) measures
     the average cross-sectional rank correlation between the momentum signal and
-    subsequent one-month returns.  An IC in the range 0.02–0.05 is considered
-    economically meaningful in live equity strategies - modest per-period
-    predictive skill compounds into substantial alpha when the portfolio is
-    well-diversified and turnover costs are managed.
+    subsequent one-month returns.
     """)
     return
 
@@ -161,7 +158,7 @@ def _(strategy):
     weights = strategy.build_portfolio(
         objective="max_sharpe",
         long_only=True,
-        max_weight=0.10,
+        max_weight=0.2,
         expected_returns="signal_rank",
     )
 
@@ -179,7 +176,7 @@ def _(strategy):
     |------|--------|--------|
     {_rows}
     """)
-    return (weights,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -194,7 +191,7 @@ def _():
     covariance estimate $\Sigma_t$.
 
     $$
-    \min_w \; w^{\top} \Sigma_t w \quad \text{s.t.} \quad \hat{\mu}_t^{\top} w = 1,\; w \geq 0,\; w \leq 0.10
+    \min_w \; w^{\top} \Sigma_t w \quad \text{s.t.} \quad \hat{\mu}_t^{\top} w = 1,\; w \geq 0,\; w \leq 0.20
     $$
 
     The resulting weights are normalised to sum to 1 and applied to the next
@@ -211,7 +208,7 @@ def _(strategy):
     _strategy_returns = strategy.backtest_rebalanced(
         objective="max_sharpe",
         long_only=True,
-        max_weight=0.10,
+        max_weight=0.2,
         expected_returns="signal_rank",
         lookback=36,
         min_observations=12,
@@ -238,13 +235,18 @@ def _(strategy):
         .filter(pl.all_horizontal(pl.all().exclude("date").is_finite()))
     )
 
-    # jquantstats analytics — benchmark included so stats cover both series.
+    # jquantstats analytics - benchmark included so stats cover both series.
     _data = Data.from_returns(
         returns=combined.select(["date", "Momentum"]),
         benchmark=combined.select(["date", "STOXX 600"]),
         date_col="date",
     )
+    _gross_data = Data.from_returns(
+        returns=combined.select(["date", "Momentum_gross"]),
+        date_col="date",
+    )
     _s = _data.stats
+    _gross_s = _gross_data.stats
 
     _sharpe = _s.sharpe()
     _mdd = _s.max_drawdown()
@@ -254,7 +256,11 @@ def _(strategy):
     _vol = _s.volatility()
 
     _mom_key = "Momentum"
+    _gross_key = "Momentum_gross"
     _bm_key = "STOXX 600"
+    _gross_sharpe = _gross_s.sharpe()
+    _gross_cagr = _gross_s.cagr()
+    _gross_mdd = _gross_s.max_drawdown()
     _attempted = max(strategy.prices.height - 2, 0)
     _successful = _strategy_returns.height
     _skipped = _attempted - _successful
@@ -265,8 +271,8 @@ def _(strategy):
     mo.md(rf"""
     ### Performance Analytics
 
-    Momentum returns are shown net of a simple 10 bps one-way transaction-cost
-    assumption applied to monthly turnover.
+    Momentum returns are shown net of a simple 10 bps cost per unit of traded
+    notional, applied to two-way monthly turnover.
 
     | Metric | Momentum | STOXX 600 |
     |--------|----------|-----------|
@@ -277,6 +283,14 @@ def _(strategy):
     | Calmar ratio | {_calmar.get(_mom_key, float("nan")):.3f} | {_calmar.get(_bm_key, float("nan")):.3f} |
     | Max drawdown | {_mdd.get(_mom_key, float("nan")):.2%} | {_mdd.get(_bm_key, float("nan")):.2%} |
 
+    ### Trading Cost Impact
+
+    | Metric | Momentum Gross | Momentum Net |
+    |--------|----------------|--------------|
+    | CAGR | {_gross_cagr.get(_gross_key, float("nan")):.2%} | {_cagr.get(_mom_key, float("nan")):.2%} |
+    | Sharpe ratio | {_gross_sharpe.get(_gross_key, float("nan")):.3f} | {_sharpe.get(_mom_key, float("nan")):.3f} |
+    | Max drawdown | {_gross_mdd.get(_gross_key, float("nan")):.2%} | {_mdd.get(_mom_key, float("nan")):.2%} |
+
     ### Rebalance Diagnostics
 
     | Diagnostic | Value |
@@ -285,7 +299,7 @@ def _(strategy):
     | Successful rebalances | {_successful} |
     | Skipped rebalances | {_skipped} |
     | Average active holdings | {_avg_active:.1f} |
-    | Average monthly turnover | {_avg_turnover:.2f} |
+    | Average two-way monthly turnover | {_avg_turnover:.2f} |
     | Average transaction cost | {_avg_cost_bps:.1f} bps |
     """)
     return (combined,)
@@ -299,7 +313,7 @@ def _(combined):
         go.Bar(
             x=_dates,
             y=combined["turnover"].to_list(),
-            name="Monthly Turnover",
+            name="Two-Way Monthly Turnover",
             marker_color="steelblue",
             yaxis="y",
         )
@@ -314,9 +328,9 @@ def _(combined):
         )
     )
     turnover_fig.update_layout(
-        title="Turnover and Active Holdings",
+        title="Two-Way Turnover and Active Holdings",
         xaxis_title="Date",
-        yaxis={"title": "Turnover", "tickformat": ".0%"},
+        yaxis={"title": "Two-way turnover", "tickformat": ".0%"},
         yaxis2={"title": "Active holdings", "overlaying": "y", "side": "right"},
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
         template="plotly_white",
@@ -392,6 +406,11 @@ def _():
     3. **Risk-model tuning.** Sweep the covariance lookback, shrinkage method,
        and per-name cap to test whether results are robust.
     """)
+    return
+
+
+@app.cell
+def _():
     return
 
 

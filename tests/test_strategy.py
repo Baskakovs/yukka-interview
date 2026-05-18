@@ -1,4 +1,4 @@
-"""Tests for interview.strategy — Strategy class."""
+"""Tests for interview.strategy - Strategy class."""
 
 from __future__ import annotations
 
@@ -53,6 +53,29 @@ class TestMeanIC:
     def test_in_range(self, strategy: Strategy) -> None:
         # mean_ic is a valid Spearman correlation, bounded in [-1, 1].
         assert -1.0 <= strategy.mean_ic <= 1.0
+
+    def test_constant_cross_sections_are_skipped(self) -> None:
+        # spearmanr returns NaN for constant cross-sections; valid dates still drive the mean.
+        dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(4)]
+        prices = pl.DataFrame(
+            {
+                "date": dates,
+                "A": [100.0, 101.0, 103.0, 106.0],
+                "B": [100.0, 102.0, 104.0, 107.0],
+                "C": [100.0, 103.0, 105.0, 108.0],
+            },
+        )
+        signal = pl.DataFrame(
+            {
+                "date": dates,
+                "A": [1.0, 1.0, 1.0, 1.0],
+                "B": [1.0, 2.0, 1.0, 1.0],
+                "C": [1.0, 3.0, 1.0, 1.0],
+            },
+        )
+        mean_ic = Strategy(prices=prices, signal=signal).mean_ic
+        assert isinstance(mean_ic, float)
+        assert np.isfinite(mean_ic)
 
 
 class TestBuildPortfolio:
@@ -148,7 +171,7 @@ class TestExpectedReturns:
         for name in ["A", "B", "C"]:
             prices[name] = (100.0 * np.exp(np.cumsum(rng.normal(0.01, 0.02, n_dates)))).tolist()
             signal[name] = rng.normal(0, 1, n_dates).tolist()
-        # Force C's latest signal to None — should be masked out.
+        # Force C's latest signal to None - should be masked out.
         signal["C"][-1] = None
         s = Strategy(prices=pl.DataFrame(prices), signal=pl.DataFrame(signal))
         w = s.build_portfolio(objective="max_sharpe", long_only=True, expected_returns="signal")
@@ -197,6 +220,13 @@ class TestSharpeRatio:
         # Sparse forward returns should not become all-NaN through nan * zero weights.
         sharpe = sparse_strategy.sharpe_ratio(objective="min_variance", long_only=True)
         assert np.isfinite(sharpe)
+
+    def test_forward_returns_renormalise_to_available_assets(self, sparse_strategy: Strategy) -> None:
+        # Missing asset returns should not mechanically reduce portfolio exposure.
+        weights = np.array([0.5, 0.5, 0.0])
+        port_ret = sparse_strategy._portfolio_forward_returns(weights)
+        expected_first = 101.0 / 100.0 - 1
+        assert port_ret[0] == pytest.approx(expected_first)
 
 
 class TestRebalancedBacktest:

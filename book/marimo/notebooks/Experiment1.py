@@ -17,7 +17,6 @@ __generated_with = "0.23.6"
 app = marimo.App()
 
 with app.setup:
-    from interview.strategy import Strategy
     import cvxpy as cp
     import marimo as mo
     import numpy as np
@@ -25,6 +24,7 @@ with app.setup:
     import polars as pl
 
     from interview.data import YukkaRepository
+    from interview.strategy import Strategy
 
 
 @app.cell(hide_code=True)
@@ -33,11 +33,10 @@ def _():
     ## Data
 
     We use the *YukkaRepository()* class to import the price data for the
-    STOXX 600 companies, then filter to stocks that were ever in the
-    STOXX 100 (by rank <= 100). This gives ~130 assets, ensuring the
-    entire pipeline operates on a well-conditioned universe.
-    The data ranges from January 2016 to December 2025. The price data
-    is resampled on the last trading day each month.
+    STOXX 600 companies, then show how to request a rank-masked top-100
+    universe through ``rank_range=(1, 100)``. This notebook is a lightweight
+    data-loading scratchpad; the momentum benchmark itself is implemented in
+    ``Experiment2.py``.
     """)
     return
 
@@ -52,7 +51,7 @@ def _():
     # Full STOXX 600 prices (membership-masked)
     prices_all = repo.prices(assets=assets, mask=True)
 
-    # Filter to STOXX 100 constituents only (rank 1-100 by market cap)
+    # Filter to top-100 STOXX 600 names by rank.
     prices = repo.prices(assets=assets, mask=True, rank_range=(1, 100))
     prices
     return
