@@ -30,6 +30,7 @@ Portfolio construction and analysis take-home for summer intern candidates.
 yukka-interview/
   src/interview/
     __init__.py             # Package init (loads .env)
+    strategy.py             # Strategy class - Part 1
     data/
       config.py             # Cache directory path
       repository.py         # Repository ABC and Asset dataclass
@@ -40,10 +41,12 @@ yukka-interview/
         ranks_wide.parquet
         benchmarks.parquet
   book/marimo/notebooks/
-    Experiment1.py          # Your working notebook
+    Experiment1.py          # Setup/data exploration notebook
+    Experiment2.py          # Momentum strategy benchmark notebook - Part 2
   tests/
     test_repository.py      # Data layer tests
     test_returns.py         # Returns class tests
+    test_strategy.py        # Strategy tests - Part 1
 ```
 
 ## Data Layer
@@ -60,14 +63,14 @@ prices = repo.prices(assets, mask=True)       # wide DataFrame: date + one colum
 returns = repo.returns(assets)                # same shape, simple returns
 ```
 
-All data is cached locally in parquet files -- no API key is needed.
+All data is cached locally in parquet files - no API key is needed.
 
 ## Running Tests
 
 ```bash
 make test
 # or
-uv run pytest
+uv run pytest -m "not integration"
 ```
 
 ## Linting
@@ -82,7 +85,7 @@ make lint
 2. Push to GitHub.
 3. Open a **Pull Request** from your fork back to this repository's `main` branch.
 4. Include a brief summary of your approach in the PR description.
-5. CI (lint + tests) will run automatically — make sure it passes.
+5. CI (lint + tests) will run automatically - make sure it passes.
 
 ## Contact
 

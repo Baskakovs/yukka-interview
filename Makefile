@@ -1,9 +1,12 @@
-.PHONY: marimo test lint typecheck
+.PHONY: marimo test test-integration lint typecheck
 
 marimo:
 	uv run marimo edit book/marimo/notebooks/Experiment1.py
 
 test:
+	uv run pytest -m "not integration"
+
+test-integration:
 	uv run pytest
 
 lint:
